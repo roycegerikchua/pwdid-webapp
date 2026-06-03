@@ -1,0 +1,9 @@
+services:
+  pwdid-webapp:
+    build: .
+    container_name: pwdid-webapp
+    restart: unless-stopped
+    ports:
+      - "3015:3015"
+    env_file:
+      - .env
