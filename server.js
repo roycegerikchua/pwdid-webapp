@@ -4,11 +4,15 @@ const path = require('path');
 const sql = require('mssql');
 const session = require('express-session');
 const bcrypt = require('bcryptjs');
+const cookieParser = require('cookie-parser');
+const jwt = require('jsonwebtoken');
 
 
 const app = express();
 const PORT = Number(process.env.PORT || 3015);
+const JWT_KEY = process.env.JWT_SECRET || 'pwdid-change-this-jwt-secret';
 
+app.set('trust proxy', 1);
 app.use(express.json({ limit: '25mb' }));
 app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 app.use(session({
@@ -16,8 +20,9 @@ app.use(session({
   secret: process.env.SESSION_SECRET || 'pwdid-change-this-session-secret',
   resave: false,
   saveUninitialized: false,
-  cookie: { httpOnly: true, sameSite: 'lax', maxAge: 12 * 60 * 60 * 1000 }
+  cookie: { httpOnly: true, sameSite: 'lax', secure: true, maxAge: 12 * 60 * 60 * 1000 }
 }));
+app.use(cookieParser());
 // No unauthenticated static index. The app shell is served by authenticated routes below.
 
 const dbConfig = {
@@ -124,6 +129,34 @@ function ctaDecrypt(sInput) {
 
 function h(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c])); }
 
+function ssoMiddleware(req, res, next) {
+  if (req.session.user) return next();
+
+  const token = req.cookies.sso_token;
+  if (!token) return next(); // No SSO token → let app's own auth handle it
+
+  try {
+    const decoded = jwt.verify(token, JWT_KEY);
+    // SSO users need branch selection first
+    req.session.pendingAuth = {
+      staffId: decoded.staff_id,
+      fullName: decoded.fullName,
+      role: decoded.role,
+      username: decoded.sub,
+      sso_login: true
+    };
+    // Redirect to branch selection if landing on any protected page
+    const skip = ['/auth/login', '/auth/select-branch', '/auth/logout', '/health', '/sso-login'];
+    if (!skip.includes(req.path)) {
+      return req.session.save(() => res.redirect('/auth/select-branch'));
+    }
+    return next();
+  } catch {
+    res.clearCookie('sso_token', { domain: '.ubesvr.com', path: '/' });
+    return next();
+  }
+}
+
 function requireAuth(req, res, next) {
   if (req.session && req.session.user) return next();
   if (req.path.startsWith('/pwdid') || req.path.startsWith('/pwd-') || req.path.startsWith('/test-pwd') || req.path.startsWith('/api/')) {
@@ -133,7 +166,7 @@ function requireAuth(req, res, next) {
 }
 
 function renderLogin(error) {
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>PWD ID Login</title><style>body{margin:0;background:#f7f3ff;font-family:Arial,sans-serif;color:#1d1730}.box{max-width:390px;margin:8vh auto;background:white;border:1px solid #ded3f4;border-radius:18px;padding:28px;box-shadow:0 12px 30px rgba(75,0,130,.08)}h1{margin:0 0 6px;color:#4b0082}.muted{color:#6f6687;margin:0 0 22px}label{display:block;font-weight:700;font-size:12px;margin:14px 0 6px;text-transform:uppercase;color:#6f6687}input{width:100%;box-sizing:border-box;padding:12px;border:1.5px solid #ded3f4;border-radius:10px;font-size:16px}button{width:100%;margin-top:18px;padding:13px;border:0;border-radius:10px;background:#4b0082;color:#fff;font-weight:800;font-size:15px}.err{background:#ffecec;color:#b4232d;border:1px solid #ffc7cc;border-radius:10px;padding:10px;margin-bottom:12px}</style></head><body><div class="box"><h1>PWD ID Checker</h1><p class="muted">Login using your UBEPOS/VIP_HO barcode and password.</p>${error ? `<div class="err">${h(error)}</div>` : ''}<form method="post" action="/auth/login"><label>Barcode / Username</label><input name="username" autocomplete="username" autofocus required><label>Password</label><input name="password" type="password" autocomplete="current-password" required><button type="submit">Login</button></form></div></body></html>`;
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>PWD ID Login</title><style>body{margin:0;background:#f7f3ff;font-family:Arial,sans-serif;color:#1d1730}.box{max-width:390px;margin:8vh auto;background:white;border:1px solid #ded3f4;border-radius:18px;padding:28px;box-shadow:0 12px 30px rgba(75,0,130,.08)}h1{margin:0 0 6px;color:#4b0082}.muted{color:#6f6687;margin:0 0 22px}label{display:block;font-weight:700;font-size:12px;margin:14px 0 6px;text-transform:uppercase;color:#6f6687}input{width:100%;box-sizing:border-box;padding:12px;border:1.5px solid #ded3f4;border-radius:10px;font-size:16px}button{width:100%;margin-top:18px;padding:13px;border:0;border-radius:10px;background:#4b0082;color:#fff;font-weight:800;font-size:15px}.err{background:#ffecec;color:#b4232d;border:1px solid #ffc7cc;border-radius:10px;padding:10px;margin-bottom:12px}.sso-btn{display:block;width:100%;margin-top:12px;padding:13px;border:2px solid #e94560;border-radius:10px;background:transparent;color:#e94560;font-weight:800;font-size:15px;text-align:center;text-decoration:none;box-sizing:border-box}.sso-btn:hover{background:#e94560;color:#fff}.hr-or{display:flex;align-items:center;margin:18px 0 4px;color:#968bab;font-size:12px;font-weight:700}.hr-or::before,.hr-or::after{content:"";flex:1;height:1px;background:#ded3f4}.hr-or:not(:empty)::before{margin-right:12px}.hr-or:not(:empty)::after{margin-left:12px}</style></head><body><div class="box"><h1>PWD ID Checker</h1><p class="muted">Login using your UBEPOS/VIP_HO barcode and password.</p>${error ? `<div class="err">${h(error)}</div>` : ''}<form method="post" action="/auth/login"><label>Barcode / Username</label><input name="username" autocomplete="username" autofocus required><label>Password</label><input name="password" type="password" autocomplete="current-password" required><button type="submit">Login</button><div class="hr-or">or</div><a href="/sso-login" class="sso-btn">Sign in with UBEPOS SSO</a></form></div></body></html>`;
 }
 
 function renderBranchSelect(pending, branches, error) {
@@ -322,6 +355,14 @@ function asyncHandler(fn) {
   return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 }
 
+app.use(ssoMiddleware);
+
+app.get('/sso-login', (req, res) => {
+  const ssoUrl = process.env.SSO_URL || 'https://sso.server.ubesvr.com';
+  const appUrl = process.env.APP_URL || 'https://pwdid.ubesvr.com';
+  res.redirect(ssoUrl + '/auth/login?redirect=' + encodeURIComponent(appUrl + '/'));
+});
+
 app.get('/auth/login', (req, res) => {
   if (req.session.user) return res.redirect('/');
   res.send(renderLogin(null));
@@ -405,14 +446,30 @@ app.post('/auth/select-branch', asyncHandler(async (req, res) => {
     return res.status(400).send(renderBranchSelect(req.session.pendingAuth, branches.recordset, 'Please select a valid branch.'));
   }
   const pending = req.session.pendingAuth;
-  await pool.request().input('id', sql.Int, pending.staffId).input('branch_id', sql.Int, branchId).query('UPDATE dbo.Staff SET branch_id = @branch_id, last_login = GETDATE(), updated_at = GETDATE() WHERE id = @id');
+  // Upsert Staff record — lookup by barcode, dbo.Staff.id is auto-increment
+  const staffRec = await pool.request()
+    .input('uname', sql.NVarChar(100), pending.username)
+    .query('SELECT id FROM dbo.Staff WHERE username = @uname');
+  let localId;
+  if (staffRec.recordset.length > 0) {
+    localId = staffRec.recordset[0].id;
+  } else {
+    const ins = await pool.request()
+      .input('uname', sql.NVarChar(100), pending.username)
+      .input('fname', sql.NVarChar(255), pending.fullName)
+      .input('role', sql.NVarChar(50), pending.role)
+      .query(`INSERT INTO dbo.Staff (employee_id, username, full_name, role, is_active)
+              OUTPUT INSERTED.id VALUES ('SSO-' + @uname, @uname, @fname, @role, 1)`);
+    localId = ins.recordset[0].id;
+  }
+  await pool.request().input('id', sql.Int, localId).input('branch_id', sql.Int, branchId).query('UPDATE dbo.Staff SET branch_id = @branch_id, last_login = GETDATE(), updated_at = GETDATE() WHERE id = @id');
   const b = branch.recordset[0];
-  req.session.user = { id: pending.staffId, username: pending.username, full_name: pending.fullName, role: pending.role, branch_id: b.id, branch_code: b.branch_code, branch_name: b.branch_name };
+  req.session.user = { id: localId, username: pending.username, full_name: pending.fullName, role: pending.role, branch_id: b.id, branch_code: b.branch_code, branch_name: b.branch_name };
   delete req.session.pendingAuth;
   res.redirect('/');
 }));
 
-app.get('/auth/logout', (req, res) => { req.session.destroy(() => res.redirect('/auth/login')); });
+app.get('/auth/logout', (req, res) => { res.clearCookie('sso_token', { domain: '.ubesvr.com', path: '/' }); req.session.destroy(() => res.redirect('/auth/login')); });
 
 app.get('/api/me', requireAuth, (req, res) => res.json({ success: true, user: req.session.user }));
 
